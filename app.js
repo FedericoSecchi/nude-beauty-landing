@@ -1,3 +1,30 @@
+// Carousel state management (per product)
+const CarouselState = {
+  states: new Map(), // productId -> currentIndex
+
+  getIndex(productId) {
+    return this.states.get(productId) || 0;
+  },
+
+  setIndex(productId, index) {
+    this.states.set(productId, index);
+  },
+
+  next(productId, maxIndex) {
+    const current = this.getIndex(productId);
+    const next = current >= maxIndex ? 0 : current + 1;
+    this.setIndex(productId, next);
+    return next;
+  },
+
+  prev(productId, maxIndex) {
+    const current = this.getIndex(productId);
+    const prev = current <= 0 ? maxIndex : current - 1;
+    this.setIndex(productId, prev);
+    return prev;
+  }
+};
+
 // Cart state management
 const Cart = {
   items: [],
@@ -7,7 +34,12 @@ const Cart = {
     // Load from localStorage
     const stored = localStorage.getItem('nude-cart');
     if (stored) {
-      this.items = JSON.parse(stored);
+      try {
+        this.items = JSON.parse(stored);
+      } catch (e) {
+        console.error('Error parsing cart from localStorage:', e);
+        this.items = [];
+      }
     }
     this.updateUI();
   },
@@ -65,11 +97,13 @@ const Cart = {
   open() {
     this.isOpen = true;
     this.updateCartSidebar();
+    document.body.style.overflow = 'hidden';
   },
 
   close() {
     this.isOpen = false;
     this.updateCartSidebar();
+    document.body.style.overflow = '';
   },
 
   toggle() {
@@ -124,11 +158,12 @@ const Cart = {
             <li class="flex gap-4 p-4 bg-card rounded-sm">
               <div class="w-16 h-16 bg-nude-sand/30 rounded-sm flex-shrink-0"></div>
               <div class="flex-1 min-w-0">
-                <h3 class="font-heading text-foreground truncate">${item.name}</h3>
+                <h3 class="font-heading text-foreground truncate">${this.escapeHtml(item.name)}</h3>
                 <p class="text-muted-foreground text-sm">€${item.price.toFixed(2)}</p>
                 <div class="flex items-center gap-2 mt-2">
                   <button
-                    onclick="Cart.updateQuantity(${item.id}, ${item.quantity - 1})"
+                    data-action="decrease"
+                    data-id="${item.id}"
                     class="w-7 h-7 flex items-center justify-center rounded-sm bg-muted hover:bg-muted/80 transition-colors"
                   >
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -137,7 +172,8 @@ const Cart = {
                   </button>
                   <span class="w-8 text-center text-sm">${item.quantity}</span>
                   <button
-                    onclick="Cart.updateQuantity(${item.id}, ${item.quantity + 1})"
+                    data-action="increase"
+                    data-id="${item.id}"
                     class="w-7 h-7 flex items-center justify-center rounded-sm bg-muted hover:bg-muted/80 transition-colors"
                   >
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -145,7 +181,8 @@ const Cart = {
                     </svg>
                   </button>
                   <button
-                    onclick="Cart.removeItem(${item.id})"
+                    data-action="remove"
+                    data-id="${item.id}"
                     class="ml-auto p-1.5 text-muted-foreground hover:text-destructive transition-colors"
                   >
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -165,6 +202,12 @@ const Cart = {
         }
       }
     }
+  },
+
+  escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   },
 
   showToast(message) {
@@ -187,10 +230,26 @@ const Products = {
 
   async load() {
     try {
-      const response = await fetch('products.json');
-      this.products = await response.json();
+      const response = await fetch('./products.json');
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      // Support both old format (image) and new format (images)
+      this.products = data.map(product => {
+        if (product.images && Array.isArray(product.images)) {
+          return product;
+        } else if (product.image) {
+          // Convert old format to new format
+          return { ...product, images: [product.image] };
+        } else {
+          // Fallback: use placeholder
+          return { ...product, images: ['/products/placeholder.jpg'] };
+        }
+      });
     } catch (error) {
       console.error('Error loading products:', error);
+      this.products = [];
     } finally {
       this.loading = false;
       this.render();
@@ -210,41 +269,203 @@ const Products = {
       return;
     }
 
-    grid.innerHTML = this.products.map((product, index) => `
-      <article 
-        class="group bg-card rounded-sm overflow-hidden shadow-card hover:shadow-soft transition-all duration-300 animate-slide-up"
-        style="animation-delay: ${0.1 + index * 0.05}s"
-      >
-        <div class="aspect-square bg-nude-sand/30 relative overflow-hidden">
-          <div class="absolute inset-0 flex items-center justify-center">
-            <div class="text-center text-muted-foreground/50">
-              <svg class="w-12 h-12 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
+    if (this.products.length === 0) {
+      grid.innerHTML = `
+        <div class="col-span-full text-center text-muted-foreground">
+          <p>No hay productos disponibles</p>
+        </div>
+      `;
+      return;
+    }
+
+    grid.innerHTML = this.products.map((product, index) => {
+      const images = product.images || [];
+      const firstImage = images[0] || '/products/placeholder.jpg';
+      const hasMultipleImages = images.length > 1;
+
+      return `
+        <article 
+          class="group bg-card rounded-sm overflow-hidden shadow-card hover:shadow-soft transition-all duration-300 animate-slide-up"
+          style="animation-delay: ${0.1 + index * 0.05}s"
+        >
+          <div class="product-carousel aspect-square bg-nude-sand/30 relative overflow-hidden" data-product-id="${product.id}">
+            <img 
+              src="${firstImage}" 
+              alt="${this.escapeHtml(product.name)}"
+              class="carousel-image w-full h-full object-cover transition-opacity duration-300"
+              data-product-id="${product.id}"
+              onerror="this.onerror=null; this.src='data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'400\' height=\'400\'%3E%3Crect fill=\'%23f5f0e8\' width=\'400\' height=\'400\'/%3E%3Ctext fill=\'%23998a7a\' font-family=\'sans-serif\' font-size=\'20\' x=\'50%25\' y=\'50%25\' text-anchor=\'middle\' dominant-baseline=\'middle\'%3EImagen no disponible%3C/text%3E%3C/svg%3E';"
+            />
+            ${hasMultipleImages ? `
+              <button 
+                class="carousel-btn carousel-btn-prev"
+                data-product-id="${product.id}"
+                data-action="prev"
+                aria-label="Imagen anterior"
+              >
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+                </svg>
+              </button>
+              <button 
+                class="carousel-btn carousel-btn-next"
+                data-product-id="${product.id}"
+                data-action="next"
+                aria-label="Siguiente imagen"
+              >
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+              <div class="carousel-dots">
+                ${images.map((_, imgIndex) => `
+                  <button 
+                    class="carousel-dot ${imgIndex === 0 ? 'active' : ''}"
+                    data-product-id="${product.id}"
+                    data-index="${imgIndex}"
+                    aria-label="Ir a imagen ${imgIndex + 1}"
+                  ></button>
+                `).join('')}
+              </div>
+            ` : ''}
+            <div class="absolute inset-0 bg-foreground/0 group-hover:bg-foreground/5 transition-colors duration-300 pointer-events-none"></div>
+          </div>
+          <div class="p-5">
+            <h3 class="font-heading text-xl text-foreground mb-1">${this.escapeHtml(product.name)}</h3>
+            <p class="text-muted-foreground text-sm mb-4 line-clamp-2">${this.escapeHtml(product.description)}</p>
+            <div class="flex items-center justify-between">
+              <span class="font-heading text-2xl text-foreground">€${product.price.toFixed(2)}</span>
+              <button 
+                data-action="add-to-cart"
+                data-product-id="${product.id}"
+                class="btn btn-nude btn-sm"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
+                </svg>
+                Agregar
+              </button>
             </div>
           </div>
-          <div class="absolute inset-0 bg-foreground/0 group-hover:bg-foreground/5 transition-colors duration-300"></div>
-        </div>
-        <div class="p-5">
-          <h3 class="font-heading text-xl text-foreground mb-1">${product.name}</h3>
-          <p class="text-muted-foreground text-sm mb-4 line-clamp-2">${product.description}</p>
-          <div class="flex items-center justify-between">
-            <span class="font-heading text-2xl text-foreground">€${product.price.toFixed(2)}</span>
-            <button 
-              onclick="Cart.addItem({id: ${product.id}, name: '${product.name.replace(/'/g, "\\'")}', price: ${product.price}})"
-              class="btn btn-nude btn-sm"
-            >
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
-              </svg>
-              Agregar
-            </button>
-          </div>
-        </div>
-      </article>
-    `).join('');
+        </article>
+      `;
+    }).join('');
+
+    // Initialize carousel state for each product
+    this.products.forEach(product => {
+      if (product.images && product.images.length > 0) {
+        CarouselState.setIndex(product.id, 0);
+      }
+    });
+  },
+
+  escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  },
+
+  updateCarouselImage(productId, imageIndex) {
+    const product = this.products.find(p => p.id == productId);
+    if (!product) return;
+
+    const images = product.images || [];
+    if (imageIndex < 0 || imageIndex >= images.length) return;
+
+    const img = document.querySelector(`.carousel-image[data-product-id="${productId}"]`);
+    if (!img) return;
+
+    // Fade out
+    img.style.opacity = '0';
+    
+    setTimeout(() => {
+      img.src = images[imageIndex];
+      img.alt = `${product.name} - Imagen ${imageIndex + 1}`;
+      // Fade in
+      img.style.opacity = '1';
+    }, 150);
+
+    // Update dots
+    const dots = document.querySelectorAll(`.carousel-dot[data-product-id="${productId}"]`);
+    dots.forEach((dot, index) => {
+      if (index === imageIndex) {
+        dot.classList.add('active');
+      } else {
+        dot.classList.remove('active');
+      }
+    });
   }
 };
+
+// Event delegation for carousel
+function handleCarouselClick(e) {
+  const btn = e.target.closest('[data-action="prev"], [data-action="next"], .carousel-dot');
+  if (!btn) return;
+
+  const productId = btn.dataset.productId;
+  if (!productId) return;
+
+  const product = Products.products.find(p => p.id == productId);
+  if (!product) return;
+
+  const images = product.images || [];
+  if (images.length <= 1) return;
+
+  const maxIndex = images.length - 1;
+  let newIndex;
+
+  if (btn.dataset.action === 'prev') {
+    newIndex = CarouselState.prev(productId, maxIndex);
+  } else if (btn.dataset.action === 'next') {
+    newIndex = CarouselState.next(productId, maxIndex);
+  } else if (btn.classList.contains('carousel-dot')) {
+    newIndex = parseInt(btn.dataset.index, 10);
+    CarouselState.setIndex(productId, newIndex);
+  } else {
+    return;
+  }
+
+  Products.updateCarouselImage(productId, newIndex);
+}
+
+// Event delegation for cart actions
+function handleCartAction(e) {
+  const btn = e.target.closest('[data-action]');
+  if (!btn || !btn.dataset.action) return;
+
+  const action = btn.dataset.action;
+  const id = parseInt(btn.dataset.id, 10);
+
+  if (isNaN(id)) return;
+
+  switch (action) {
+    case 'add-to-cart':
+      const product = Products.products.find(p => p.id == id);
+      if (product) {
+        Cart.addItem({
+          id: product.id,
+          name: product.name,
+          price: product.price
+        });
+      }
+      break;
+    case 'increase':
+      const itemInc = Cart.items.find(item => item.id === id);
+      if (itemInc) {
+        Cart.updateQuantity(id, itemInc.quantity + 1);
+      }
+      break;
+    case 'decrease':
+      const itemDec = Cart.items.find(item => item.id === id);
+      if (itemDec) {
+        Cart.updateQuantity(id, itemDec.quantity - 1);
+      }
+      break;
+    case 'remove':
+      Cart.removeItem(id);
+      break;
+  }
+}
 
 // Initialize app
 document.addEventListener('DOMContentLoaded', () => {
@@ -275,12 +496,40 @@ document.addEventListener('DOMContentLoaded', () => {
     cartOverlay.addEventListener('click', () => Cart.close());
   }
 
+  // Keyboard support: Escape to close cart
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && Cart.isOpen) {
+      Cart.close();
+    }
+  });
+
+  // Event delegation for cart actions
+  const cartItems = document.getElementById('cart-items');
+  if (cartItems) {
+    cartItems.addEventListener('click', handleCartAction);
+  }
+
+  // Event delegation for product cards (add to cart)
+  const productsGrid = document.getElementById('products-grid');
+  if (productsGrid) {
+    productsGrid.addEventListener('click', handleCartAction);
+  }
+
+  // Event delegation for carousel
+  if (productsGrid) {
+    productsGrid.addEventListener('click', handleCarouselClick);
+  }
+
   // WhatsApp checkout
   const whatsappCheckout = document.getElementById('whatsapp-checkout');
   if (whatsappCheckout) {
     whatsappCheckout.addEventListener('click', () => {
+      if (Cart.items.length === 0) {
+        Cart.showToast('Tu carrito está vacío');
+        return;
+      }
       const message = Cart.buildWhatsAppMessage();
-      window.open(`https://wa.me/34600000000?text=${message}`, '_blank');
+      window.open(`https://wa.me/5493517033348?text=${message}`, '_blank');
     });
   }
 
@@ -296,6 +545,5 @@ document.addEventListener('DOMContentLoaded', () => {
   Products.load();
 });
 
-// Make Cart methods available globally for onclick handlers
+// Make Cart methods available globally for backwards compatibility
 window.Cart = Cart;
-
